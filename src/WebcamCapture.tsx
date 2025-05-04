@@ -1,137 +1,218 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import * as faceapi from 'face-api.js';
+import { useRef, useEffect, useState, useCallback } from 'react';
+import * as faceapi from '@vladmandic/face-api';
+
+// Type definition for face detection with age and gender
+type FaceDetectionWithAgeGender = faceapi.WithAge<
+  faceapi.WithGender<
+    faceapi.WithFaceLandmarks<faceapi.WithFaceDetection<{}>, faceapi.FaceLandmarks68>
+  >
+>;
+
+const MODEL_URL = process.env.PUBLIC_URL + '/models';
+const DETECTION_INTERVAL = 300; // in milliseconds
+
+const VIDEO_CONSTRAINTS = {
+  video: {
+    width: { ideal: 720 },
+    height: { ideal: 560 },
+    facingMode: 'user'
+  }
+};
 
 function WebcamCapture() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [isCameraOn, setIsCameraOn] = useState(false);
+  const [detections, setDetections] = useState<FaceDetectionWithAgeGender[]>([]); // Fixed typo from 'detections' to 'detections'
 
-  // Load models
+  const detectionInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Load face-api models
   const loadModels = useCallback(async () => {
     try {
       setLoading(true);
-      const MODEL_URL = '/models';
-      await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
-
-      try {
-        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-      } catch {
-        await faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
-      }
-
+      setError(null);
+      await Promise.all([
+        faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.ageGenderNet.loadFromUri(MODEL_URL),
+        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+      ]);
       setModelsLoaded(true);
-      setLoading(false);
     } catch (err) {
       console.error("Model loading failed:", err);
-      setError("Failed to load models. Check console.");
+      setError("Could not load models. Please check your connection or refresh.");
+    } finally {
       setLoading(false);
     }
   }, []);
 
-  // Start webcam
-  const startCamera = async () => {
-    try {
-      const localStream = await navigator.mediaDevices.getUserMedia({ video: true });
-      if (videoRef.current) {
-        videoRef.current.srcObject = localStream;
-      }
-      setStream(localStream);
-      setIsCameraOn(true);
-    } catch (err) {
-      console.error("Webcam error:", err);
-      setError("Webcam access denied or failed.");
-    }
-  };
-
-  // Stop webcam
-  const stopCamera = () => {
+  const stopCamera = useCallback(() => {
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
+      setStream(null);
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-    setStream(null);
     setIsCameraOn(false);
-  };
+    setDetections([]);
+    if (detectionInterval.current) {
+      clearInterval(detectionInterval.current);
+    }
+  }, [stream]);
 
-  // Face detection
-  useEffect(() => {
-    if (!modelsLoaded || !videoRef.current || !canvasRef.current || !isCameraOn) return;
+  const startCamera = useCallback(async () => {
+    try {
+      if (stream) stopCamera();
 
-    const detectFaces = async () => {
-      const video = videoRef.current;
+      const localStream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
+      if (videoRef.current) {
+        videoRef.current.srcObject = localStream;
+        await new Promise<void>(resolve => { // Added explicit void type to Promise
+          if (videoRef.current) {
+            videoRef.current.onloadedmetadata = () => resolve();
+          }
+        });
+      }
+
+      setStream(localStream);
+      setIsCameraOn(true);
+      setError(null);
+    } catch (err) {
+      console.error("Webcam error:", err);
+      setError("Could not access webcam. Please grant permission.");
+      setIsCameraOn(false);
+    }
+  }, [stopCamera, stream]);
+
+  const detectFaces = useCallback(async () => {
+    if (!videoRef.current || !canvasRef.current || !modelsLoaded || !isCameraOn) return;
+
+    try {
+        const detections = await faceapi
+          .detectAllFaces(videoRef.current, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+          .withFaceLandmarks()
+          .withAgeAndGender();
+        setDetections(detections as unknown as FaceDetectionWithAgeGender[]);
+
       const canvas = canvasRef.current;
+      const dims = {
+        width: videoRef.current.videoWidth,
+        height: videoRef.current.videoHeight,
+      };
 
-      if (!video || !canvas || video.readyState !== 4) return;
-
-      const detections = await faceapi.detectAllFaces(
-        video,
-        new faceapi.SsdMobilenetv1Options()
-      ).withFaceLandmarks();
-
-      faceapi.matchDimensions(canvas, video);
-      const resized = faceapi.resizeResults(detections, video);
+      faceapi.matchDimensions(canvas, dims);
+      const resizedDetections = faceapi.resizeResults(detections, dims);
 
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        faceapi.draw.drawDetections(canvas, resized);
-        faceapi.draw.drawFaceLandmarks(canvas, resized);
+        faceapi.draw.drawDetections(canvas, resizedDetections);
+        faceapi.draw.drawFaceLandmarks(canvas, resizedDetections);
       }
-    };
-
-    const interval = setInterval(detectFaces, 300);
-    return () => clearInterval(interval);
+    } catch (err) {
+      console.error("Detection error:", err);
+    }
   }, [modelsLoaded, isCameraOn]);
 
+  // Load models on mount
   useEffect(() => {
     loadModels();
-    return stopCamera; // Cleanup on unmount
-  }, [loadModels]);
+    return () => {
+      stopCamera();
+    };
+  }, [loadModels, stopCamera]);
+
+  // Start camera automatically once models are loaded
+  useEffect(() => {
+    if (modelsLoaded && !isCameraOn) {
+      startCamera();
+    }
+  }, [modelsLoaded, isCameraOn, startCamera]);
+
+  // Start/stop face detection loop
+  useEffect(() => {
+    if (modelsLoaded && isCameraOn) {
+      detectionInterval.current = setInterval(detectFaces, DETECTION_INTERVAL);
+      return () => {
+        if (detectionInterval.current) {
+          clearInterval(detectionInterval.current);
+        }
+      };
+    }
+  }, [modelsLoaded, isCameraOn, detectFaces]);
 
   return (
-    <div style={{ textAlign: 'center' }}>
-      {loading && <div>Loading models...</div>}
-      {error && <div style={{ color: 'red' }}>{error}</div>}
+    <div className="container mt-4 text-center">
+      <h2 className="mb-4">Face Detection & Age/Gender Estimation</h2>
 
-      <div style={{ marginBottom: '10px' }}>
-        <button onClick={startCamera} disabled={isCameraOn || loading} style={{ marginRight: '10px' }}>
-          Start Webcam
-        </button>
-        <button onClick={stopCamera} disabled={!isCameraOn}>
-          Stop Webcam
+      {loading && (
+        <div className="alert alert-info">
+          <span className="spinner-border spinner-border-sm me-2" /> Loading models...
+        </div>
+      )}
+
+      {error && (
+        <div className="alert alert-danger">
+          {error}
+          <button className="btn btn-sm btn-outline-danger ms-2" onClick={() => window.location.reload()}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      <div className="mb-3">
+        <button
+          className={`btn ${isCameraOn ? 'btn-danger' : 'btn-success'} me-2`}
+          onClick={isCameraOn ? stopCamera : startCamera}
+          disabled={loading}
+        >
+          {isCameraOn ? 'Stop Webcam' : 'Start Webcam'}
         </button>
       </div>
 
-      <div style={{ position: 'relative', width: '720px', margin: '0 auto' }}>
+      <div className="position-relative mx-auto" style={{ maxWidth: '720px' }}>
         <video
           ref={videoRef}
           autoPlay
           muted
           playsInline
-          width="720"
-          height="560"
-          style={{ backgroundColor: '#000', display: isCameraOn ? 'block' : 'none' }}
+          className="bg-dark rounded"
+          style={{ display: isCameraOn ? 'block' : 'none', width: '100%' }}
         />
-
         <canvas
           ref={canvasRef}
-          width="720"
-          height="560"
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            pointerEvents: 'none',
-            display: isCameraOn ? 'block' : 'none'
-          }}
+          className="position-absolute top-0 start-0"
+          style={{ pointerEvents: 'none', width: '100%', height: '100%' }}
         />
+        {detections.map((d, i) => (
+          <div
+            key={i}
+            className="position-absolute bg-dark text-white bg-opacity-75 rounded p-1"
+            style={{
+              left: `${d.detection.box.x.toFixed(2)}px`,
+              top: `${Math.max(0, d.detection.box.y - 30).toFixed(2)}px`,
+              minWidth: '140px'
+            }}
+          >
+            <small>
+              Age: ~{Math.round(d.age)} | Gender: {d.gender} ({Math.round(d.genderProbability * 100)}%)
+            </small>
+          </div>
+        ))}
       </div>
+
+      {detections.length > 0 && (
+        <div className="mt-3">
+          <h5>Detected: {detections.length} face{detections.length !== 1 ? 's' : ''}</h5>
+        </div>
+      )}
     </div>
   );
 }
