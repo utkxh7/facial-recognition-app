@@ -1,26 +1,50 @@
-// utils/faceDetection.ts (or your detection file)
-export async function safeDetectFaces(input: HTMLImageElement | HTMLVideoElement) {
-    try {
-      // @ts-ignore
-      const detections = await faceapi.detectAllFaces(input);
-      return validateDetections(detections); // Add this new function
-    } catch (error) {
-      console.error("Face detection crashed:", error);
-      return [];
-    }
-  }
-  
-  // NEW: Add this validation function in the same file
-  function validateDetections(detections: any[]) {
-    if (!Array.isArray(detections)) return [];
+import * as faceapi from '@vladmandic/face-api';
+
+// Define a simplified type that matches v0.22.2's actual output
+export type SafeFaceDetection = {
+  detection: {
+    box: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
+    score: number;
+  };
+  landmarks?: faceapi.FaceLandmarks68;
+  age?: number;
+  gender?: 'male' | 'female';
+  genderProbability?: number;
+};
+
+export async function safeDetectFaces(
+  input: HTMLImageElement | HTMLVideoElement,
+  options?: faceapi.SsdMobilenetv1Options
+): Promise<SafeFaceDetection[]> {
+  try {
+    // @ts-ignore - Temporary bypass for version mismatch
+    const detections = await faceapi
+      .detectAllFaces(input, options)
+      .withFaceLandmarks()
+      .withAgeAndGender();
     
-    return detections.filter(det => {
-      const box = det.detection?.box;
-      return (
-        box &&
-        typeof box.x === 'number' &&
-        typeof box.width === 'number' &&
-        box.width > 10 // Minimum face size
-      );
-    });
+    return validateDetections(detections);
+  } catch (error) {
+    console.error("Face detection error:", error);
+    return [];
   }
+}
+
+function validateDetections(detections: any[]): SafeFaceDetection[] {
+  if (!Array.isArray(detections)) return [];
+
+  return detections.filter(det => {
+    const box = det.detection?.box;
+    return (
+      box &&
+      typeof box.x === 'number' &&
+      typeof box.width === 'number' &&
+      box.width > 10 // Minimum face size
+    );
+  });
+}

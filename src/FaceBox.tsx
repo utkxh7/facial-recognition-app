@@ -4,3 +4,4 @@ function FaceBox({ face }: { face: any }) {
   
     // Rest of your rendering logic...
   }
+  export {}; // Add this line
