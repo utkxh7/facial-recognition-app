@@ -59,7 +59,11 @@ const WebcamCapture = () => {
 
   useEffect(() => {
     if (!modelsLoaded || !isCameraOn) return;
-    const interval = setInterval(detectFaces, 300);
+
+    const interval = setInterval(() => {
+      detectFaces();
+    }, 300);
+
     return () => clearInterval(interval);
   }, [modelsLoaded, isCameraOn]);
 
